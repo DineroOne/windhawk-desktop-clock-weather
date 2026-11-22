@@ -1,5 +1,7 @@
 # Desktop Clock & Weather - a Windhawk mod
+
 ![Illustration of the widget (mockup)](https://raw.githubusercontent.com/DineroOne/windhawk-desktop-clock-weather/main/widget-mockup.png)
+
 Shows time, weekday, date and a 3-7 day weather forecast directly on the Windows desktop,
 **above the wallpaper but below icons and folders**, so it is never clickable.
 
@@ -16,6 +18,16 @@ Weather comes from [Open-Meteo](https://open-meteo.com) (free, no API key).
 1. Install [Windhawk](https://windhawk.net).
 2. In Windhawk click **Create a new mod**, paste the contents of `mods/desktop-clock-weather.wh.cpp`, then **Compile**.
 3. Open the mod's **Settings** tab to customize.
+
+## Network use
+Weather is the only feature that uses the network, and only after you enter a city in the settings.
+The mod then sends HTTPS requests to two Open-Meteo hosts:
+
+- `geocoding-api.open-meteo.com` - once whenever the city changes, to turn the city name into coordinates (the city name and the language code are sent).
+- `api.open-meteo.com` - at start and then every N minutes (30 by default), to get the forecast (the coordinates are sent).
+
+Like any web server, Open-Meteo can see your IP address. No API key, account or other personal data is sent.
+No requests are made while the city setting is empty or **Show weather** is off.
 
 ## License
 MIT - see [LICENSE](LICENSE).
