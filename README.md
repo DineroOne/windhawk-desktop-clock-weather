@@ -1,5 +1,5 @@
 # Desktop Clock & Weather - a Windhawk mod
-
+![Illustration of the widget (mockup)](https://raw.githubusercontent.com/DineroOne/windhawk-desktop-clock-weather/main/widget-mockup.png)
 Shows time, weekday, date and a 3-7 day weather forecast directly on the Windows desktop,
 **above the wallpaper but below icons and folders**, so it is never clickable.
 
