@@ -8,6 +8,7 @@
 // @include         explorer.exe
 // @compilerOptions -lgdi32 -lgdiplus -lwinhttp -luser32
 // ==/WindhawkMod==
+// @github https://github.com/DineroOne
 
 // ==WindhawkModReadme==
 /*
