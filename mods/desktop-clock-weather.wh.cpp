@@ -2,10 +2,10 @@
 // @id              desktop-clock-weather
 // @name            Desktop Clock & Weather
 // @description     Time, weekday, date and weekly weather on the desktop - behind icons, not clickable
-// @version         1.0.3
+// @version         1.0.4
 // @author          DineroOne
 // @license         MIT
-// @github https://github.com/DineroOne
+// @github          https://github.com/DineroOne
 // @include         explorer.exe
 // @compilerOptions -lgdi32 -lgdiplus -lwinhttp -luser32
 // ==/WindhawkMod==
@@ -13,6 +13,8 @@
 // ==WindhawkModReadme==
 /*
 # Desktop Clock & Weather
+
+![Illustration of the widget (mockup)](https://raw.githubusercontent.com/DineroOne/windhawk-desktop-clock-weather/main/widget-mockup.png)
 
 The widget is drawn directly on the desktop: **above the wallpaper but below icons and folders**,
 so it never intercepts clicks.
@@ -22,6 +24,17 @@ Weather comes from [Open-Meteo](https://open-meteo.com) (free, no API key needed
 Set the city name in the settings; coordinates are found automatically.
 
 Everything (position, size, font, colors, shadow, background, date format, etc.) is configurable in the settings tab.
+
+## Network use
+
+Weather is the only feature that uses the network, and only after you enter a city in the settings.
+The mod then sends HTTPS requests to two Open-Meteo hosts:
+
+- `geocoding-api.open-meteo.com` - once whenever the city changes, to turn the city name into coordinates (the city name and the language code are sent).
+- `api.open-meteo.com` - at start and then every N minutes (30 by default, see **Update weather every**), to get the forecast (the coordinates are sent).
+
+Like any web server, Open-Meteo can see your IP address. No API key, account or other personal data is sent.
+No requests are made while the city setting is empty or **Show weather** is off.
 */
 // ==/WindhawkModReadme==
 
@@ -135,9 +148,9 @@ Everything (position, size, font, colors, shadow, background, date format, etc.)
   $name: Gap between lines (px)
 - showWeather: true
   $name: Show weather
-- city: Zabrze
+- city: ""
   $name: City for weather
-  $description: City name in any language. If it cannot be found, "city not found" is shown.
+  $description: Enter your city, in any language (for example Warsaw), to enable weather. No network requests are made until a city is set. If it cannot be found, "city not found" is shown.
 - tempUnit: celsius
   $name: Temperature unit
   $options:
@@ -164,6 +177,7 @@ Everything (position, size, font, colors, shadow, background, date format, etc.)
 // ==/WindhawkModSettings==
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -181,7 +195,7 @@ using namespace Gdiplus;
 
 #define WM_APP_RENDER (WM_APP + 1)
 
-// ───────────────────────── настройки ─────────────────────────
+// ───────────────────────── settings ─────────────────────────
 
 struct Settings {
     std::wstring position = L"topright", textAlign = L"right", locale, dateFormat = L"d MMMM yyyy";
@@ -189,7 +203,7 @@ struct Settings {
     std::wstring timeFont, weekdayFont, dateFont, weatherFont, order = L"time,weekday,date,weather";
     std::wstring timeColor = L"#FFFFFF", weekdayColor = L"#FFD36B", dateColor = L"#FFFFFF", weatherColor = L"#FFFFFF";
     std::wstring shadowColor = L"#000000", bgColor = L"#000000";
-    std::wstring city = L"Zabrze", tempUnit = L"celsius", weatherLayout = L"horizontal";
+    std::wstring city, tempUnit = L"celsius", weatherLayout = L"horizontal";
     int marginX = 40, marginY = 40, monitor = 0, scale = 100;
     int timeSize = 96, weekdaySize = 36, dateSize = 24, weatherSize = 18, iconSize = 30;
     int textOpacity = 100, shadowOpacity = 60, shadowOffset = 2, bgOpacity = 0, cornerRadius = 16, padding = 12, lineGap = 6;
@@ -203,7 +217,6 @@ struct Weather {
     bool valid = false, hasCur = false;
     std::wstring place, status = L"Weather: loading...";
     double cur = 0;
-    int curCode = 0;
     std::vector<Day> days;
 };
 
@@ -211,8 +224,8 @@ static CRITICAL_SECTION g_cs;
 static Settings g_s;
 static Weather g_w;
 static HANDLE g_evStop, g_evRefresh, g_thUi, g_thWx;
-static volatile HWND g_hwnd;
-static HWND g_host, g_after;
+static std::atomic<HWND> g_hwnd{nullptr};
+static PVOID volatile g_req = nullptr;  // in-flight WinHTTP request; closed by Wh_ModUninit to abort it
 static volatile LONG g_dirty = 1;
 static LONG g_lastKey = -1;
 static const wchar_t kClass[] = L"WhDesktopClockWeatherWnd";
@@ -283,7 +296,7 @@ static void LoadSettings() {
     LeaveCriticalSection(&g_cs);
 }
 
-// ───────────────────────── утилиты ─────────────────────────
+// ───────────────────────── helpers ─────────────────────────
 
 static std::wstring Widen(const std::string& s) {
     if (s.empty()) return L"";
@@ -336,6 +349,7 @@ static const wchar_t* IconFor(int c) {
 // ───────────────────────── HTTP + JSON (Open-Meteo) ─────────────────────────
 
 static bool HttpGet(const wchar_t* host, const std::wstring& path, std::string& out) {
+    if (WaitForSingleObject(g_evStop, 0) == WAIT_OBJECT_0) return false;
     bool ok = false;
     HINTERNET ses = WinHttpOpen(L"WindhawkDesktopClockWeather/1.0", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
                                 WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
@@ -344,6 +358,7 @@ static bool HttpGet(const wchar_t* host, const std::wstring& path, std::string& 
     HINTERNET con = WinHttpConnect(ses, host, INTERNET_DEFAULT_HTTPS_PORT, 0);
     HINTERNET req = con ? WinHttpOpenRequest(con, L"GET", path.c_str(), nullptr, WINHTTP_NO_REFERER,
                                              WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE) : nullptr;
+    if (req) InterlockedExchangePointer(&g_req, req);
     if (req && WinHttpSendRequest(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
         WinHttpReceiveResponse(req, nullptr)) {
         DWORD code = 0, sz = sizeof(code);
@@ -360,7 +375,7 @@ static bool HttpGet(const wchar_t* host, const std::wstring& path, std::string& 
             }
         }
     }
-    if (req) WinHttpCloseHandle(req);
+    if (req && InterlockedExchangePointer(&g_req, nullptr) == req) WinHttpCloseHandle(req);  // otherwise an abort already closed it
     if (con) WinHttpCloseHandle(con);
     WinHttpCloseHandle(ses);
     return ok && !out.empty();
@@ -496,9 +511,8 @@ static bool FetchWeather(const Settings& s) {
 
     size_t c = body.find("\"current\":{");
     if (c != std::string::npos) {
-        double a = 0, b = 0;
+        double a = 0;
         if (NumAfter(body, "temperature_2m", c, a)) { nw.hasCur = true; nw.cur = a; }
-        if (NumAfter(body, "weather_code", c, b)) nw.curCode = (int)b;
     }
 
     EnterCriticalSection(&g_cs);
@@ -516,10 +530,10 @@ static DWORD WINAPI WeatherThread(LPVOID) {
 
         DWORD wait = INFINITE;
         if (s.showWeather && (!g_hwnd || GetSystemMetrics(SM_SHUTTINGDOWN))) {
-            wait = 3000;  // окна ещё нет, либо это не shell-процесс explorer.exe — не ходим в сеть зря
+            wait = 3000;  // no window yet, or not the shell explorer.exe, or shutting down: no network use
         } else if (s.showWeather) {
             bool ok = FetchWeather(s);
-            wait = ok ? (DWORD)s.updateMinutes * 60000 : 60000;
+            wait = ok ? (DWORD)s.updateMinutes * 60000 : (s.city.empty() ? INFINITE : 60000);
             HWND h = g_hwnd;
             if (h) PostMessageW(h, WM_APP_RENDER, 0, 0);
         }
@@ -528,7 +542,7 @@ static DWORD WINAPI WeatherThread(LPVOID) {
     }
 }
 
-// ───────────────────────── отрисовка ─────────────────────────
+// ───────────────────────── rendering ─────────────────────────
 
 struct MonList { std::vector<MONITORINFO> v; };
 static BOOL CALLBACK MonEnum(HMONITOR m, HDC, LPRECT, LPARAM l) {
@@ -595,7 +609,7 @@ static void Render() {
     GetLocalTime(&st);
     g_lastKey = TimeKey(st, s.showSeconds);
 
-    // строки времени/даты
+    // time/date strings
     wchar_t buf[160];
     std::wstring tTime, tWd, tDate;
     if (s.showTime) {
@@ -608,7 +622,7 @@ static void Render() {
     }
     if (s.showDate && GetDateFormatEx(loc, 0, &st, s.dateFormat.c_str(), buf, 160, nullptr)) tDate = buf;
 
-    // шрифты
+    // fonts
     int style = (s.bold ? FontStyleBold : 0) | (s.italic ? FontStyleItalic : 0);
     auto fam = [&](const std::wstring& f) { return f.empty() ? s.fontFamily : f; };
     auto fTime = MakeFont(fam(s.timeFont), std::max(8, s.timeSize) * k, style);
@@ -644,7 +658,7 @@ static void Render() {
     addLine(L"weekday", tWd, fWd.get(), cWd);
     addLine(L"date", tDate, fDate.get(), cDate);
 
-    // погода
+    // weather
     auto fmtT = [&](double v) { return std::isnan(v) ? std::wstring(L"-") : std::to_wstring((int)std::lround(v)) + L"\u00B0"; };
     struct Cell { std::wstring t; int kind = 0; bool acc = false; SizeF z; };
     std::vector<std::vector<Cell>> grid;
@@ -761,7 +775,7 @@ static void Render() {
     int W = std::clamp((int)std::ceil(Wc + 2 * pad + sd) + 2, 4, 4000);
     int H = std::clamp((int)std::ceil(y + 2 * pad + sd) + 2, 4, 4000);
 
-    // DIB для UpdateLayeredWindow
+    // DIB section for UpdateLayeredWindow
     HDC scr = GetDC(nullptr);
     BITMAPINFO bi = {};
     bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
@@ -813,7 +827,7 @@ static void Render() {
     BLENDFUNCTION bf = {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
     UpdateLayeredWindow(hw, scr, nullptr, &sz, mem, &src, 0, &bf, ULW_ALPHA);
 
-    // позиция
+    // position
     MonList ml;
     EnumDisplayMonitors(nullptr, nullptr, MonEnum, (LPARAM)&ml);
     if (!ml.v.empty()) {
@@ -861,7 +875,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     return DefWindowProcW(h, m, w, l);
 }
 
-// ───────────────────────── размещение за значками ─────────────────────────
+// ───────────────────────── placement behind the icons ─────────────────────────
 
 // True once the desktop icon list exists, i.e. the shell has finished creating the desktop.
 static bool DesktopReady(HWND pm) {
@@ -926,11 +940,10 @@ static DWORD WINAPI UiThread(LPVOID) {
     while (WaitForSingleObject(g_evStop, 0) != WAIT_OBJECT_0) {
         HWND host = nullptr, after = nullptr;
         if (!FindHost(host, after)) {
-            DWORD ms = tries++ < 120 ? 1000 : 10000;  // при загрузке рабочий стол появляется не сразу
+            DWORD ms = tries++ < 120 ? 1000 : 10000;  // the desktop may appear late during logon
             if (WaitForSingleObject(g_evStop, ms) == WAIT_OBJECT_0) break;
             continue;
         }
-        g_host = host; g_after = after;
         HWND h = CreateWindowExW(WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_NOPARENTNOTIFY, kClass, L"",
                                  WS_CHILD | WS_VISIBLE, 0, 0, 1, 1, host, nullptr, hi, nullptr);
         if (!h) {
@@ -961,7 +974,7 @@ static DWORD WINAPI UiThread(LPVOID) {
     return 0;
 }
 
-// ───────────────────────── точки входа Windhawk ─────────────────────────
+// ───────────────────────── Windhawk entry points ─────────────────────────
 
 BOOL Wh_ModInit() {
     InitializeCriticalSection(&g_cs);
@@ -994,8 +1007,10 @@ void Wh_ModSettingsChanged() {
 
 void Wh_ModUninit() {
     SetEvent(g_evStop);
-    if (g_thUi) { WaitForSingleObject(g_thUi, 10000); CloseHandle(g_thUi); }
-    if (g_thWx) { WaitForSingleObject(g_thWx, 15000); CloseHandle(g_thWx); }
+    HINTERNET pending = (HINTERNET)InterlockedExchangePointer(&g_req, nullptr);  // abort an in-flight HTTP request
+    if (pending) WinHttpCloseHandle(pending);
+    if (g_thUi) { WaitForSingleObject(g_thUi, INFINITE); CloseHandle(g_thUi); }
+    if (g_thWx) { WaitForSingleObject(g_thWx, INFINITE); CloseHandle(g_thWx); }
     CloseHandle(g_evStop);
     CloseHandle(g_evRefresh);
     DeleteCriticalSection(&g_cs);
