@@ -3,7 +3,7 @@
 Shows time, weekday, date and a 3-7 day weather forecast directly on the Windows desktop,
 **above the wallpaper but below icons and folders**, so it is never clickable.
 
-![Illustration of the widget (mockup)](https://raw.githubusercontent.com/DineroOne/windhawk-desktop-clock-weather/main/widget-mockup.png)
+![Illustration of the widget (mockup)](https://raw.githubusercontent.com/DineroOne/windhawk-desktop-clock-weather/main/screenshot-small.png)
 
 Weather comes from [Open-Meteo](https://open-meteo.com) (free, no API key).
 
